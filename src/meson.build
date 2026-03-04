@@ -321,7 +321,10 @@ if have_local_backend
     ]
 
     if host_os == 'android'
-      backend_vala_args_private += frida_selinux_vala_args
+      backend_vala_args_private += [
+        '--pkg=jni',
+        frida_selinux_vala_args,
+      ]
       backend_libs += frida_selinux
       backend_deps += frida_selinux_dep
     endif

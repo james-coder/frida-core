@@ -34,6 +34,7 @@ namespace Frida {
 
 #if ANDROID
 		private Promise<AndroidHelperClient>? android_helper_request;
+		private Module? vm_module;
 		private Subprocess? android_helper_process;
 		private RoboLauncher robo_launcher;
 		private CrashMonitor? crash_monitor;
@@ -431,60 +432,8 @@ namespace Frida {
 
 				var helper_address = new UnixSocketAddress.with_type ("/frida-helper-" + instance_id, -1, ABSTRACT);
 
-				var launcher = new SubprocessLauncher (STDIN_INHERIT | STDOUT_PIPE | STDERR_PIPE);
-				launcher.setenv ("CLASSPATH", helper_path, true);
-				process = launcher.spawn (
-					"app_process",
-					"/data/local/tmp",
-					"--nice-name=re.frida.helper",
-					"re.frida.Helper",
-					instance_id
-				);
-				uint pid = uint.parse (process.get_identifier ());
-
-				var output = new DataInputStream (process.get_stdout_pipe ());
-				var errput = new DataInputStream (process.get_stderr_pipe ());
-
-				string? line = yield output.read_line_utf8_async (Priority.DEFAULT, cancellable);
-				if (line == null || line != "READY.") {
-					string error_details = "";
-
-					try {
-						StringBuilder sb = new StringBuilder ();
-						while (true) {
-							string? l = yield errput.read_line_utf8_async (Priority.DEFAULT, cancellable);
-							if (l == null)
-								break;
-							sb.append (l);
-							sb.append_c ('\n');
-						}
-						error_details = sb.str;
-					} catch (GLib.Error e) {
-					}
-
-					try {
-						yield process.wait_check_async (cancellable);
-					} catch (GLib.Error e) {
-						if (error_details.length == 0)
-							error_details = e.message;
-						else
-							error_details = error_details + "\n" + e.message;
-					}
-
-					string? logs = yield collect_logcat_for_pid (pid, cancellable);
-					if (logs != null)
-						error_details = error_details + "\n\n" + logs;
-
-					if (line == null) {
-						throw new Error.NOT_SUPPORTED ("Unable to spawn Android helper: %s", error_details);
-					} else {
-						throw new Error.PROTOCOL ("Unexpected output from Android helper: %s\nstderr:\n%s",
-							line, error_details);
-					}
-				}
-
-				process_android_helper_stream.begin (output, "stdout");
-				process_android_helper_stream.begin (errput, "stderr");
+				if (!try_load_android_helper_inprocess (helper_path))
+					process = yield launch_android_helper (helper_path, instance_id, cancellable);
 
 				var sc = new SocketClient ();
 				var stream = yield sc.connect_async (helper_address, cancellable);
@@ -504,12 +453,124 @@ namespace Frida {
 				if (process != null)
 					process.force_exit ();
 
-				var api_error = new Error.NOT_SUPPORTED ("%s", e.message);
+				var api_error = (e is Error) ? e : new Error.NOT_SUPPORTED ("%s", e.message);
 
 				android_helper_request.reject (api_error);
 
 				throw_api_error (api_error);
 			}
+		}
+
+		private bool try_load_android_helper_inprocess (string helper_path) {
+			try {
+				var art_libdir = "/apex/com.android.art/" + ((sizeof (void *) == 8) ? "lib64" : "lib");
+
+				var palette_mod = new Module (Path.build_filename (art_libdir, "libartpalette.so"), LAZY);
+
+				var artbase_mod = new Module (Path.build_filename (art_libdir, "libartbase.so"), LAZY);
+				void * mem_map_init_impl;
+				if (!artbase_mod.symbol ("_ZN3art6MemMap4InitEv", out mem_map_init_impl))
+					return false;
+				var mem_map_init = (MemMapInitFunc) mem_map_init_impl;
+
+				var profile_mod = new Module (Path.build_filename (art_libdir, "libprofile.so"), LAZY);
+
+				var vm_mod = new Module (Path.build_filename (art_libdir, "libart.so"), LAZY);
+				void * create_java_vm_impl;
+				if (!vm_mod.symbol ("JNI_CreateJavaVM", out create_java_vm_impl))
+					return false;
+				var create_java_vm = (CreateVMFunc) create_java_vm_impl;
+
+				var rt_mod = new Module ("libandroid_runtime.so", LAZY);
+
+				printerr (">>> MemMap::Init()\n");
+				mem_map_init ();
+				printerr ("<<< MemMap::Init()\n");
+
+				var args = Jni.VMInitArgs () {
+					version = Jni.VERSION_1_2,
+					options = {
+						Jni.VMOption () { option_string = "-Djava.class.path=" + helper_path },
+					},
+				};
+
+				void * vm;
+				void * env;
+				var res = create_java_vm (out vm, out env, args);
+
+				printerr ("res=%d vm=%p env=%p\n", res, vm, env);
+			} catch (ModuleError e) {
+				printerr ("Oops: %s\n", e.message);
+				return false;
+			}
+
+			return false;
+		}
+
+		[CCode (has_target = false)]
+		private delegate void MemMapInitFunc ();
+
+		[CCode (has_target = false)]
+		private delegate Jni.Result CreateVMFunc (out void * vm, out void * env, Jni.VMInitArgs vm_args);
+
+		private async Subprocess launch_android_helper (string helper_path, string instance_id, Cancellable? cancellable)
+				throws GLib.Error {
+			var launcher = new SubprocessLauncher (STDIN_INHERIT | STDOUT_PIPE | STDERR_PIPE);
+			launcher.setenv ("CLASSPATH", helper_path, true);
+			var process = launcher.spawn (
+				"app_process",
+				"/data/local/tmp",
+				"--nice-name=re.frida.helper",
+				"re.frida.Helper",
+				instance_id
+			);
+			uint pid = uint.parse (process.get_identifier ());
+
+			var output = new DataInputStream (process.get_stdout_pipe ());
+			var errput = new DataInputStream (process.get_stderr_pipe ());
+
+			string? line = yield output.read_line_utf8_async (Priority.DEFAULT, cancellable);
+			if (line == null || line != "READY.") {
+				string error_details = "";
+
+				try {
+					StringBuilder sb = new StringBuilder ();
+					while (true) {
+						string? l = yield errput.read_line_utf8_async (Priority.DEFAULT, cancellable);
+						if (l == null)
+							break;
+						sb.append (l);
+						sb.append_c ('\n');
+					}
+					error_details = sb.str;
+				} catch (GLib.Error e) {
+				}
+
+				try {
+					yield process.wait_check_async (cancellable);
+				} catch (GLib.Error e) {
+					if (error_details.length == 0)
+						error_details = e.message;
+					else
+						error_details = error_details + "\n" + e.message;
+				}
+
+				string? logs = yield collect_logcat_for_pid (pid, cancellable);
+				if (logs != null)
+					error_details = error_details + "\n\n" + logs;
+
+				if (line == null) {
+					throw new Error.NOT_SUPPORTED ("Unable to spawn Android helper: %s", error_details);
+				} else {
+					throw new Error.PROTOCOL ("Unexpected output from Android helper: %s\nstderr:\n%s",
+						line, error_details);
+				}
+			}
+
+			process_android_helper_stream.begin (output, "stdout");
+			process_android_helper_stream.begin (errput, "stderr");
+
+			return process;
 		}
 
 		private void on_android_helper_client_closed (AndroidHelperClient helper) {
