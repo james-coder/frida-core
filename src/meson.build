@@ -322,6 +322,7 @@ if have_local_backend
 
     if host_os == 'android'
       backend_vala_args_private += [
+        '--pkg=frida-gum-android-1.0',
         '--pkg=jni',
         frida_selinux_vala_args,
       ]

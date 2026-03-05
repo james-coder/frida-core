@@ -463,8 +463,6 @@ namespace Frida {
 
 		private bool try_load_android_helper_inprocess (string helper_path) {
 			try {
-				dump_here ("A");
-
 				var art_libdir = "/apex/com.android.art/" + ((sizeof (void *) == 8) ? "lib64" : "lib");
 				ensure_directory_on_ld_library_path (art_libdir);
 
@@ -473,22 +471,31 @@ namespace Frida {
 				if (create_java_vm == null)
 					return false;
 
-				dump_here ("B");
+				var rt_mod = Gum.Module.load ("libandroid_runtime.so");
+				var register_framework_natives =
+					(RegisterFrameworkNativesFunc) rt_mod.find_export_by_name ("registerFrameworkNatives");
+				if (register_framework_natives == null)
+					return false;
 
-				//var rt_mod = Gum.Module.load ("libandroid_runtime.so");
-
-				var args = Jni.VMInitArgs () {
-					version = Jni.VERSION_1_2,
+				var args = JNI.VMInitArgs () {
+					version = JNI.VERSION_1_2,
 					options = {
-						Jni.VMOption () { option_string = "-Djava.class.path=" + helper_path },
+						JNI.VMOption () { option_string = "-Djava.class.path=" + helper_path },
 					},
 				};
 
 				void * vm;
-				void * env;
+				JNI.NativeInterface ** env;
 				var res = create_java_vm (out vm, out env, args);
-
 				printerr ("res=%d vm=%p env=%p\n", res, vm, env);
+				assert (res == OK);
+
+				res = register_framework_natives (env);
+				assert (res == OK);
+
+				printerr ("READY!\n");
+
+				(*env)->push_local_frame (env, 7);
 			} catch (Gum.Error e) {
 				printerr ("Oops: %s\n", e.message);
 				return false;
@@ -498,12 +505,10 @@ namespace Frida {
 		}
 
 		private static void ensure_directory_on_ld_library_path (string dir) {
-			var linker = Gum.Process.find_module_by_name ("/system/bin/linker" + ((sizeof (void *) == 8) ? "64" : ""));
-			assert (linker != null);
+			var linker = Gum.Android.get_linker_module ();
 
 			var get_path = (GetLdLibraryPathFunc) linker.find_export_by_name ("__loader_android_get_LD_LIBRARY_PATH");
 			var update_path = (UpdateLdLibraryPathFunc) linker.find_export_by_name ("__loader_android_update_LD_LIBRARY_PATH");
-			printerr ("get_path=%p update_path=%p\n", (void *) get_path, (void *) update_path);
 			if (get_path == null || update_path == null)
 				return;
 
@@ -522,38 +527,21 @@ namespace Frida {
 					.append_c (':')
 					.append (old_path);
 			}
-			printerr ("Called __loader_android_update_LD_LIBRARY_PATH with: >>>%s<<<\n", new_path.str);
+
 			update_path (new_path.str);
 		}
 
-		private void dump_here (string label) {
-			var names = new Gee.HashMap<string, uint> ();
-			Gum.Process.enumerate_modules (m => {
-				uint count = names[m.name];
-				names[m.name] = count + 1;
-				return true;
-			});
+		[CCode (has_target = false)]
+		private delegate JNI.Result CreateVMFunc (out void * vm, out JNI.NativeInterface ** env, JNI.VMInitArgs vm_args);
 
-			uint num_dupes = 0;
-			foreach (var e in names.entries) {
-				if (e.value > 1) {
-					printerr ("%s: %s count=%u\n", label, e.key, e.value);
-					num_dupes++;
-				}
-			}
-
-			if (num_dupes == 0)
-				printerr ("%s: no dupes found\n", label);
-		}
+		[CCode (has_target = false)]
+		private delegate JNI.Result RegisterFrameworkNativesFunc (void * env);
 
 		[CCode (has_target = false)]
 		private delegate void GetLdLibraryPathFunc (char[] buf);
 
 		[CCode (has_target = false)]
 		private delegate void UpdateLdLibraryPathFunc (string path);
-
-		[CCode (has_target = false)]
-		private delegate Jni.Result CreateVMFunc (out void * vm, out void * env, Jni.VMInitArgs vm_args);
 
 		private async Subprocess launch_android_helper (string helper_path, string instance_id, Cancellable? cancellable)
 				throws GLib.Error {

@@ -1,11 +1,11 @@
-[CCode (cheader_filename = "jni.h", cprefix = "", gir_namespace = "Jni", gir_version = "1.0")]
-namespace Jni {
+[CCode (cheader_filename = "jni.h", gir_namespace = "Jni", gir_version = "1.0")]
+namespace JNI {
 	public const int VERSION_1_1;
 	public const int VERSION_1_2;
 	public const int VERSION_1_4;
 	public const int VERSION_1_6;
 
-	[CCode (cname = "jint", has_type_id = false)]
+	[CCode (cname = "jint", cprefix = "JNI_", has_type_id = false)]
 	public enum Result {
 		OK,
 		ERR,
@@ -33,4 +33,13 @@ namespace Jni {
 		[CCode (cname = "extraInfo")]
 		public void * extra_info;
 	}
+
+	[CCode (cname = "struct JNINativeInterface")]
+	public struct NativeInterface {
+		[CCode (cname = "PushLocalFrame")]
+		public PushLocalFrameFunc push_local_frame;
+	}
+
+	[CCode (has_target = false)]
+	public delegate Result PushLocalFrameFunc (NativeInterface ** env, int capacity);
 }
