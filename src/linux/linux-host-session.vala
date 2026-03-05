@@ -496,6 +496,11 @@ namespace Frida {
 				printerr ("READY!\n");
 
 				(*env)->push_local_frame (env, 7);
+
+				var helper_class = (*env)->find_class (env, "re/frida/Helper");
+				printerr ("got helper_class=%p\n", helper_class);
+
+				(*env)->pop_local_frame (env, null);
 			} catch (Gum.Error e) {
 				printerr ("Oops: %s\n", e.message);
 				return false;
