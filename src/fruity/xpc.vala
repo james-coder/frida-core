@@ -446,12 +446,25 @@ namespace Frida.Fruity {
 			string peer_identifier = start_inner_response
 				.read_member ("identifier")
 				.get_uuid_value ();
+			Bytes peer_signature = start_inner_response
+				.read_member ("signature")
+				.get_data_value ();
 			PairingPeer? peer = store.find_peer_by_identifier (peer_identifier);
 			if (peer == null) {
 				yield notify_pair_verify_failed (cancellable);
 				return null;
 			}
-			// TODO: Verify signature using peer's public key.
+
+			var peer_pubkey = new Key.from_raw_public_key (ED25519, null, peer.public_key.get_data ());
+
+			var signed_message = new ByteArray.sized (100);
+			signed_message.append (raw_device_pubkey);
+			signed_message.append (peer_identifier.data);
+			signed_message.append (raw_host_pubkey);
+			if (!verify_message_signature (ByteArray.free_to_bytes ((owned) signed_message), peer_signature, peer_pubkey)) {
+				yield notify_pair_verify_failed (cancellable);
+				return null;
+			}
 
 			unowned string host_identifier = store.self_identity.identifier;
 
@@ -984,6 +997,14 @@ namespace Frida.Fruity {
 			ctx.digest_sign (signature, ref size, data);
 
 			return new Bytes.take ((owned) signature);
+		}
+
+		private static bool verify_message_signature (Bytes message, Bytes signature, Key key) {
+			var ctx = new MessageDigestContext ();
+			if (ctx.digest_verify_init (null, null, null, key) != 1)
+				return false;
+
+			return ctx.digest_verify (signature.get_data (), message.get_data ()) == 1;
 		}
 
 		private class ChaCha20Poly1305 {

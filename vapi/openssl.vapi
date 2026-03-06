@@ -382,6 +382,11 @@ namespace OpenSSL {
 			public int digest_sign_final ([CCode (array_length = false)] uint8[]? sigret, ref size_t siglen);
 			[CCode (cname = "EVP_DigestSign")]
 			public int digest_sign ([CCode (array_length = false)] uint8[]? sigret, ref size_t siglen, uint8[] tbs);
+
+			[CCode (cname = "EVP_DigestVerifyInit")]
+			public int digest_verify_init (PublicKeyContext ** pctx, MessageDigest? type, Engine? engine = null, Key? key = null);
+			[CCode (cname = "EVP_DigestVerify")]
+			public int digest_verify (uint8[] sigret, uint8[] tbs);
 		}
 
 		[Compact]
