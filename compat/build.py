@@ -4,10 +4,10 @@ import base64
 from collections import OrderedDict
 from dataclasses import dataclass, field
 import itertools
+import json
 import locale
 import os
 from pathlib import Path
-import pickle
 import platform
 import shlex
 import shutil
@@ -58,7 +58,7 @@ def main(argv):
     command = subparsers.add_parser("compile", help="compile compatibility assets")
     command.add_argument("privdir", help="directory to store intermediate files", type=Path)
     command.add_argument("state", help="opaque state from the setup step")
-    command.set_defaults(func=lambda args: compile(args.privdir, pickle.loads(base64.b64decode(args.state))))
+    command.set_defaults(func=lambda args: compile(args.privdir, decode_state(args.state)))
 
     args = parser.parse_args()
     if "func" in args:
@@ -325,7 +325,7 @@ def setup(role: Role,
         allowed_prebuilds = set(raw_allowed_prebuilds.split(",")) if raw_allowed_prebuilds is not None else None
 
         state = State(role, builddir, top_builddir, frida_version, host_os, host_config, allowed_prebuilds, outputs)
-        serialized_state = base64.b64encode(pickle.dumps(state)).decode('ascii')
+        serialized_state = encode_state(state)
 
         if missing:
             summary = ", ".join([f"{m.label} disabled due to missing toolchain for {m.triplet}" for m in missing])
@@ -392,6 +392,109 @@ class Output:
 class MissingFeature:
     label: str
     triplet: str
+
+
+def encode_state(state: State) -> str:
+    payload = json.dumps(serialize_state(state), separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.b64encode(payload).decode("ascii")
+
+
+def decode_state(raw_state: str) -> State:
+    try:
+        raw_payload = base64.b64decode(raw_state)
+        return deserialize_state(json.loads(raw_payload.decode("utf-8")))
+    except Exception as e:
+        raise ValueError("invalid serialized state") from e
+
+
+def serialize_state(state: State) -> dict[str, Any]:
+    serialized_outputs = []
+    for group, outputs in state.outputs.items():
+        serialized_outputs.append({
+            "group": {
+                "arch": group.arch,
+                "triplet": group.triplet,
+                "extra_environ": group.extra_environ,
+            },
+            "outputs": [{
+                "identifier": o.identifier,
+                "name": o.name,
+                "file": o.file.as_posix(),
+                "target": o.target,
+            } for o in outputs],
+        })
+
+    return {
+        "role": state.role,
+        "builddir": state.builddir.as_posix(),
+        "top_builddir": state.top_builddir.as_posix(),
+        "frida_version": state.frida_version,
+        "host_os": state.host_os,
+        "host_config": state.host_config,
+        "allowed_prebuilds": sorted(state.allowed_prebuilds) if state.allowed_prebuilds is not None else None,
+        "outputs": serialized_outputs,
+    }
+
+
+def deserialize_state(payload: Any) -> State:
+    if not isinstance(payload, dict):
+        raise ValueError("state payload must be an object")
+
+    role = payload.get("role")
+    if role not in {"project", "subproject"}:
+        raise ValueError("invalid role in state payload")
+
+    raw_outputs = payload.get("outputs")
+    if not isinstance(raw_outputs, list):
+        raise ValueError("invalid outputs in state payload")
+
+    outputs: OrderedDict[OutputGroup, Sequence[Output]] = OrderedDict()
+    for output_group in raw_outputs:
+        if not isinstance(output_group, dict):
+            raise ValueError("malformed output group entry")
+
+        raw_group = output_group.get("group")
+        raw_group_outputs = output_group.get("outputs")
+        if not isinstance(raw_group, dict) or not isinstance(raw_group_outputs, list):
+            raise ValueError("malformed group payload")
+
+        raw_extra_environ = raw_group.get("extra_environ", {})
+        if not isinstance(raw_extra_environ, dict):
+            raise ValueError("malformed extra_environ payload")
+
+        group = OutputGroup(
+            arch=raw_group.get("arch"),
+            triplet=raw_group.get("triplet"),
+            extra_environ={str(k): str(v) for k, v in raw_extra_environ.items()},
+        )
+
+        group_outputs: list[Output] = []
+        for raw_output in raw_group_outputs:
+            if not isinstance(raw_output, dict):
+                raise ValueError("malformed output payload")
+
+            group_outputs.append(Output(
+                identifier=str(raw_output["identifier"]),
+                name=str(raw_output["name"]),
+                file=Path(str(raw_output["file"])),
+                target=str(raw_output["target"]),
+            ))
+
+        outputs[group] = group_outputs
+
+    raw_allowed_prebuilds = payload.get("allowed_prebuilds")
+    allowed_prebuilds = set(raw_allowed_prebuilds) if isinstance(raw_allowed_prebuilds, list) else None
+
+    return State(
+        role=role,
+        builddir=Path(str(payload["builddir"])),
+        top_builddir=Path(str(payload["top_builddir"])),
+        frida_version=str(payload["frida_version"]),
+        host_os=str(payload["host_os"]),
+        host_config=str(payload["host_config"]) if payload.get("host_config") is not None else None,
+        allowed_prebuilds=allowed_prebuilds,
+        outputs=outputs,
+    )
 
 
 def compile(privdir: Path, state: State):
