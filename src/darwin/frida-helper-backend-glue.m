@@ -418,6 +418,8 @@ static void frida_inject_instance_on_posix_thread_dead (void * context);
 
 static gboolean frida_agent_context_init (FridaAgentContext * self, const FridaAgentDetails * details, const FridaInjectPayloadLayout * layout,
     mach_vm_address_t payload_base, mach_vm_size_t payload_size, GumDarwinModuleResolver * resolver, GumDarwinMapper * mapper, GError ** error);
+static gboolean frida_copy_string_to_fixed_buffer (gchar * buffer, gsize buffer_size, const gchar * str,
+    const gchar * field_name, GError ** error);
 static gboolean frida_agent_context_init_functions (FridaAgentContext * self, GumDarwinModuleResolver * resolver, GumDarwinMapper * mapper,
     GError ** error);
 
@@ -4224,23 +4226,55 @@ frida_agent_context_init (FridaAgentContext * self, const FridaAgentDetails * de
   self->dylib_path = payload_base + layout->data_offset +
       G_STRUCT_OFFSET (FridaAgentContext, dylib_path_storage);
   if (details->dylib_path != NULL)
-    strcpy (self->dylib_path_storage, details->dylib_path);
+  {
+    if (!frida_copy_string_to_fixed_buffer (self->dylib_path_storage, sizeof (self->dylib_path_storage),
+        details->dylib_path, "path", error))
+      return FALSE;
+  }
   self->dlopen_mode = RTLD_LAZY;
 
   self->entrypoint_name = payload_base + layout->data_offset +
       G_STRUCT_OFFSET (FridaAgentContext, entrypoint_name_storage);
-  strcpy (self->entrypoint_name_storage, details->entrypoint_name);
+  if (!frida_copy_string_to_fixed_buffer (self->entrypoint_name_storage, sizeof (self->entrypoint_name_storage),
+      details->entrypoint_name, "entrypoint", error))
+    return FALSE;
 
   self->entrypoint_data = payload_base + layout->data_offset +
       G_STRUCT_OFFSET (FridaAgentContext, entrypoint_data_storage);
-  g_assert (strlen (details->entrypoint_data) < sizeof (self->entrypoint_data_storage));
-  strcpy (self->entrypoint_data_storage, details->entrypoint_data);
+  if (!frida_copy_string_to_fixed_buffer (self->entrypoint_data_storage, sizeof (self->entrypoint_data_storage),
+      details->entrypoint_data, "data", error))
+    return FALSE;
 
   self->mapped_range = (mapper != NULL)
       ? payload_base + layout->data_offset + G_STRUCT_OFFSET (FridaAgentContext, mapped_range_storage)
       : 0;
   self->mapped_range_storage.base_address = payload_base;
   self->mapped_range_storage.size = payload_size;
+
+  return TRUE;
+}
+
+static gboolean
+frida_copy_string_to_fixed_buffer (gchar * buffer, gsize buffer_size, const gchar * str, const gchar * field_name,
+    GError ** error)
+{
+  gsize length;
+
+  if (str == NULL)
+    str = "";
+
+  length = strlen (str);
+  if (length >= buffer_size)
+  {
+    g_set_error (error,
+        FRIDA_ERROR,
+        FRIDA_ERROR_INVALID_ARGUMENT,
+        "Injector argument '%s' is too long (got %" G_GSIZE_FORMAT " bytes, max is %" G_GSIZE_FORMAT ")",
+        field_name, length, buffer_size - 1);
+    return FALSE;
+  }
+
+  g_strlcpy (buffer, str, buffer_size);
 
   return TRUE;
 }

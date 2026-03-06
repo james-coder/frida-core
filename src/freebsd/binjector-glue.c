@@ -185,6 +185,8 @@ static gboolean frida_inject_instance_detach (FridaInjectInstance * self, const 
 static gboolean frida_inject_instance_start_remote_thread (FridaInjectInstance * self, gboolean * exited, GError ** error);
 static gboolean frida_inject_instance_emit_and_transfer_payload (FridaInjectEmitFunc func, const FridaInjectParams * params, GumAddress * entrypoint, GError ** error);
 static void frida_inject_instance_emit_payload_code (const FridaInjectParams * params, GumAddress remote_address, FridaCodeChunk * code);
+static gboolean frida_copy_string_to_fixed_buffer (gchar * buffer, gsize buffer_size, const gchar * str,
+    const gchar * field_name, GError ** error);
 
 static gboolean frida_wait_for_attach_signal (pid_t pid);
 static gboolean frida_wait_for_child_signal (pid_t pid, int signal, gboolean * exited);
@@ -1017,15 +1019,32 @@ frida_inject_instance_emit_and_transfer_payload (FridaInjectEmitFunc func, const
 
   data = (FridaTrampolineData *) (scratch_buffer + params->data.offset);
   libthr_name = _frida_detect_libthr_name ();
-  strcpy (data->pthread_so_string, libthr_name);
+  if (!frida_copy_string_to_fixed_buffer (data->pthread_so_string, sizeof (data->pthread_so_string), libthr_name,
+      "libthr path", error))
+  {
+    g_free (libthr_name);
+    goto beach;
+  }
   g_free (libthr_name);
-  strcpy (data->pthread_create_string, "pthread_create");
-  strcpy (data->pthread_detach_string, "pthread_detach");
-  strcpy (data->pthread_getthreadid_np_string, "pthread_getthreadid_np");
-  strcpy (data->fifo_path, params->fifo_path);
-  strcpy (data->so_path, params->so_path);
-  strcpy (data->entrypoint_name, params->entrypoint_name);
-  strcpy (data->entrypoint_data, params->entrypoint_data);
+  if (!frida_copy_string_to_fixed_buffer (data->pthread_create_string, sizeof (data->pthread_create_string),
+      "pthread_create", "pthread_create symbol", error))
+    goto beach;
+  if (!frida_copy_string_to_fixed_buffer (data->pthread_detach_string, sizeof (data->pthread_detach_string),
+      "pthread_detach", "pthread_detach symbol", error))
+    goto beach;
+  if (!frida_copy_string_to_fixed_buffer (data->pthread_getthreadid_np_string, sizeof (data->pthread_getthreadid_np_string),
+      "pthread_getthreadid_np", "pthread_getthreadid_np symbol", error))
+    goto beach;
+  if (!frida_copy_string_to_fixed_buffer (data->fifo_path, sizeof (data->fifo_path), params->fifo_path, "fifo path", error))
+    goto beach;
+  if (!frida_copy_string_to_fixed_buffer (data->so_path, sizeof (data->so_path), params->so_path, "path", error))
+    goto beach;
+  if (!frida_copy_string_to_fixed_buffer (data->entrypoint_name, sizeof (data->entrypoint_name),
+      params->entrypoint_name, "entrypoint", error))
+    goto beach;
+  if (!frida_copy_string_to_fixed_buffer (data->entrypoint_data, sizeof (data->entrypoint_data),
+      params->entrypoint_data, "data", error))
+    goto beach;
   data->hello_byte = FRIDA_PROGRESS_MESSAGE_TYPE_HELLO;
 
   if (!frida_remote_write (pid, params->remote_address + params->code.offset, scratch_buffer + params->code.offset, code.size, error))
@@ -1046,6 +1065,31 @@ beach:
   g_free (scratch_buffer);
 
   return success;
+}
+
+static gboolean
+frida_copy_string_to_fixed_buffer (gchar * buffer, gsize buffer_size, const gchar * str, const gchar * field_name,
+    GError ** error)
+{
+  gsize length;
+
+  if (str == NULL)
+    str = "";
+
+  length = strlen (str);
+  if (length >= buffer_size)
+  {
+    g_set_error (error,
+        FRIDA_ERROR,
+        FRIDA_ERROR_INVALID_ARGUMENT,
+        "Injector argument '%s' is too long (got %" G_GSIZE_FORMAT " bytes, max is %" G_GSIZE_FORMAT ")",
+        field_name, length, buffer_size - 1);
+    return FALSE;
+  }
+
+  g_strlcpy (buffer, str, buffer_size);
+
+  return TRUE;
 }
 
 #define ARG_IMM(value) \

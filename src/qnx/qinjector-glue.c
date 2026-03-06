@@ -119,6 +119,8 @@ struct _FridaFindLandingStripContext
 };
 
 static gboolean frida_emit_and_remote_execute (FridaEmitFunc func, const FridaInjectionParams * params, GumAddress * result, GError ** error);
+static gboolean frida_copy_string_to_fixed_buffer (gchar * buffer, gsize buffer_size, const gchar * str,
+    const gchar * field_name, GError ** error);
 
 static void frida_emit_payload_code (const FridaInjectionParams * params, GumAddress remote_address, FridaCodeChunk * code);
 
@@ -272,9 +274,14 @@ frida_emit_and_remote_execute (FridaEmitFunc func, const FridaInjectionParams * 
   func (params, GUM_ADDRESS (params->remote_address), &code);
 
   data = (FridaTrampolineData *) (code.bytes + FRIDA_REMOTE_DATA_OFFSET);
-  strcpy (data->so_path, params->so_path);
-  strcpy (data->entrypoint_name, params->entrypoint_name);
-  strcpy (data->entrypoint_data, params->entrypoint_data);
+  if (!frida_copy_string_to_fixed_buffer (data->so_path, sizeof (data->so_path), params->so_path, "path", error))
+    return FALSE;
+  if (!frida_copy_string_to_fixed_buffer (data->entrypoint_name, sizeof (data->entrypoint_name),
+      params->entrypoint_name, "entrypoint", error))
+    return FALSE;
+  if (!frida_copy_string_to_fixed_buffer (data->entrypoint_data, sizeof (data->entrypoint_data),
+      params->entrypoint_data, "data", error))
+    return FALSE;
   data->worker_thread = 0;
   data->module_handle = NULL;
 
@@ -290,6 +297,31 @@ frida_emit_and_remote_execute (FridaEmitFunc func, const FridaInjectionParams * 
 
   if (frida_remote_pthread_create (params->pid, params->remote_address, error) != 0)
     return FALSE;
+
+  return TRUE;
+}
+
+static gboolean
+frida_copy_string_to_fixed_buffer (gchar * buffer, gsize buffer_size, const gchar * str, const gchar * field_name,
+    GError ** error)
+{
+  gsize length;
+
+  if (str == NULL)
+    str = "";
+
+  length = strlen (str);
+  if (length >= buffer_size)
+  {
+    g_set_error (error,
+        FRIDA_ERROR,
+        FRIDA_ERROR_INVALID_ARGUMENT,
+        "Injector argument '%s' is too long (got %" G_GSIZE_FORMAT " bytes, max is %" G_GSIZE_FORMAT ")",
+        field_name, length, buffer_size - 1);
+    return FALSE;
+  }
+
+  g_strlcpy (buffer, str, buffer_size);
 
   return TRUE;
 }
